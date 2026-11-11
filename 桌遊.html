@@ -1,0 +1,1279 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CAPITAL PULSE v2：零等待極簡商戰大富翁</title>
+<meta name="description" content="CAPITAL PULSE v2：零等待極簡商戰大富翁，單檔 HTML Canvas 策略桌遊">
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0f19; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+           -webkit-user-select: none; user-select: none; outline: none; }
+  noscript { color: #f8fafc; font-family: system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1280" height="800" tabindex="0"></canvas>
+<noscript>請啟用 JavaScript 以遊玩 CAPITAL PULSE v2。</noscript>
+<script>
+/* =====================================================================
+   CAPITAL PULSE v2：零等待極簡商戰大富翁（單一 HTML 檔，零外部資源）
+   - 直接放上 GitHub Pages（檔名 index.html）即可執行
+   - 全部圖形以 Canvas 2D 原生繪製；字體走系統繁中字型堆疊
+   - 操作：滑鼠 / 觸控點擊；1~4 選步數卡、Enter 確認
+   v2 三大機制：
+     1. 無陷阱：10 秒內挑一張步數卡，4 人同時出牌、同時移動
+     2. 半價入股 30%（付 50%）／ 雙倍攔截奪地（付 200%）／ 放行
+     3. 撞格＝平分產權：兩人各付 50%，一人地主 70%、一人小股東 30%
+   ===================================================================== */
+'use strict';
+
+// ════════════════════════════════════════════════════════════════
+// 一、常數與 Tailwind 深色調色盤
+// ════════════════════════════════════════════════════════════════
+const W = 1280, H = 800, TOP_H = 52;
+
+const C_BG = [11, 15, 25];            // slate-950
+const C_PANEL = [18, 24, 38, 0.80];   // slate-900/80
+const CARD_BG = [30, 41, 59, 0.70];   // slate-800/70
+const BORDER = [51, 65, 85, 0.60];    // slate-700/60
+const C_MUTED = [100, 116, 139];
+const C_TEXT = [248, 250, 252];       // slate-50
+const C_SUB = [148, 163, 184];        // slate-400
+const C_SKY = [56, 189, 248];         // 玩家 1
+const C_INDIGO = [129, 140, 248];     // 玩家 2
+const C_ORANGE = [251, 146, 60];      // 玩家 3
+const C_PINK = [244, 114, 182];       // 玩家 4
+const C_GREEN = [52, 211, 153];       // emerald-400：半價入股／獲利
+const C_RED = [248, 113, 113];        // rose-400：雙倍攔截／罰款
+
+const FONT = '"PingFang TC","Microsoft JhengHei UI","Microsoft JhengHei","Noto Sans CJK TC","Noto Sans TC","Heiti TC","STHeiti","Hiragino Sans","Source Han Sans TC","WenQuanYi Zen Hei",system-ui,-apple-system,"Segoe UI",sans-serif';
+
+// 版面
+const LEFT_X = 10, LEFT_W = 276;
+const CENTER_X = 296, CENTER_W = 680;
+const RIGHT_X = 986, RIGHT_W = 286;
+const CONTENT_Y = 62, CONTENT_H = 728;
+const CELL = 128, GAP = 5;
+const BOARD_SIZE = 5 * CELL + 4 * GAP;
+const BOARD_X = CENTER_X + Math.floor((CENTER_W - BOARD_SIZE) / 2);
+const BOARD_Y = CONTENT_Y + Math.floor((CONTENT_H - BOARD_SIZE) / 2);
+
+// 遊戲規則
+const START_CASH = 3500, MAX_ROUND = 12, PLAN_TIME = 10.0;
+const PASS_START = 600, INTEL_BONUS = 400, AUDIT_TAX = 400;
+const SHARE_COST = 0.50;      // 半價入股
+const SHARE_PCT = 0.30;       // 小股東分紅 30%
+const INTERCEPT_COST = 2.00;  // 雙倍攔截
+const MONO_MULT = 2.0;        // 同色街區壟斷：過路費 ×2
+const RESERVE = 100;          // 自願花費時至少保留的現金
+
+const RING = [[0,0],[1,0],[2,0],[3,0],[4,0],[4,1],[4,2],[4,3],[4,4],[3,4],[2,4],[1,4],[0,4],[0,3],[0,2],[0,1]];
+
+const GROUPS = [["科技藍", [59,130,246]], ["綠能綠", [34,197,94]], ["晶圓橘", [249,115,22]], ["AI 紫", [168,85,247]]];
+const PROPS = {
+  1:["雲端基地",0,800], 2:["軟體園區",0,900], 3:["資安中心",0,1000],
+  5:["太陽能場",1,1000], 6:["風力矩陣",1,1100], 7:["氫能工廠",1,1200],
+  9:["晶圓代工廠",2,1300], 10:["封裝測試廠",2,1400], 11:["光罩研發所",2,1500],
+  13:["演算法實驗室",3,1500], 14:["超算資料中心",3,1650], 15:["機器人工廠",3,1800]
+};
+const CORNERS = {
+  0:["創投起點","經過領 $600",C_GREEN], 4:["內線情報局","抽紅利 $400",C_SKY],
+  8:["安全港","安全休息區",C_INDIGO], 12:["稽查處","罰款 $400",C_RED]
+};
+const PLAYER_DEFS = [
+  ["你","你",C_SKY,true,{}],
+  ["華爾街之狼","華",C_INDIGO,false,{agg:0.9,share:0.3}],
+  ["矽谷創投家","矽",C_ORANGE,false,{agg:0.4,share:0.9}],
+  ["對沖狙擊手","對",C_PINK,false,{agg:0.7,share:0.5}]
+];
+const LINES = {
+  collide: ["可惡！居然預判到我要踩這格？", "這都能撞上？看來大家都想要這塊地。"],
+  split: ["平分產權，那就一起賺吧！", "好吧，這塊地我們共享。"],
+  split_lose: ["我被擠出局了…下次不讓你們撞到我。", "沒拿到產權，可惡。"],
+  got_shared: ["又被你半價入股躺賺了...", "搭便車？下次我先下手為強！"],
+  share_ai: ["謝啦，這塊黃金地段我入股 30% 躺著分紅囉！", "半價入股，穩穩收租的感覺真好。"],
+  intercept: ["誰准你湊齊同色壟斷的？雙倍攔截！", "這塊我截胡了，想壟斷？沒那麼容易。"],
+  intercepted: ["太狠了吧！居然雙倍截胡我的地？", "你竟然雙倍攔截我…記住這筆帳。"],
+  rent_get: ["謝謝惠顧～過路費收下了！", "這條街的收益真不錯。"],
+  rent_pay: ["過路費好貴…下次繞開這裡。", "唉，又被收租了。"],
+  monopoly: ["同色街區到手，過路費翻倍！", "壟斷達成，收租時間到！"],
+  bonus: ["內線消息很準，紅利入袋。", "情報局的紅利，收下了。"]
+};
+
+// ════════════════════════════════════════════════════════════════
+// 二、工具函式
+// ════════════════════════════════════════════════════════════════
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+// Ease-Out Cubic：棋子移動、飄字、淡入的核心曲線
+const easeOut = t => { t = clamp(t, 0, 1); return 1 - Math.pow(1 - t, 3); };
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const lighten = (c, v) => [Math.min(255, c[0] + v), Math.min(255, c[1] + v), Math.min(255, c[2] + v)];
+const A = (c, a) => [c[0], c[1], c[2], a];
+const css = c => `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},${c.length > 3 ? c[3] : 1})`;
+const fmt = n => Math.round(n).toLocaleString('en-US');
+const rnd = (a, b) => a + Math.random() * (b - a);
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+const shuffle = arr => { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; };
+const sample2 = arr => { const a = shuffle(arr.slice()); return [a[0], a[1]]; };
+
+// 矩形：{x,y,w,h,r,b,cx,cy}
+const R = (x, y, w, h) => ({ x, y, w, h, r: x + w, b: y + h, cx: x + w / 2, cy: y + h / 2 });
+const infl = (q, dx, dy) => R(q.x - dx / 2, q.y - dy / 2, q.w + dx, q.h + dy);
+const mv = (q, dx, dy) => R(q.x + dx, q.y + dy, q.w, q.h);
+const hit = (q, p) => p.x >= q.x && p.x < q.r && p.y >= q.y && p.y < q.b;
+const HUB = R(BOARD_X + CELL + GAP, BOARD_Y + CELL + GAP, 3 * CELL + 2 * GAP, 3 * CELL + 2 * GAP);
+
+// ════════════════════════════════════════════════════════════════
+// 三、深色毛玻璃繪圖基元（Canvas 2D）
+// ════════════════════════════════════════════════════════════════
+const canvas = document.getElementById('game');
+const X = canvas.getContext('2d');
+
+function rrPath(x, y, w, h, r, noBegin) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  if (!noBegin) X.beginPath();
+  X.moveTo(x + r, y);
+  X.arcTo(x + w, y, x + w, y + h, r);
+  X.arcTo(x + w, y + h, x, y + h, r);
+  X.arcTo(x, y + h, x, y, r);
+  X.arcTo(x, y, x + w, y, r);
+  X.closePath();
+}
+// 圓角矩形：填色 + 內縮描邊（fill / border 皆可帶 alpha）
+function fillRR(fill, q, rad, border, bw) {
+  bw = bw || 1;
+  if (fill) { rrPath(q.x, q.y, q.w, q.h, rad); X.fillStyle = css(fill); X.fill(); }
+  if (border) {
+    rrPath(q.x + bw / 2, q.y + bw / 2, q.w - bw, q.h - bw, rad - bw / 2);
+    X.lineWidth = bw; X.strokeStyle = css(border); X.stroke();
+  }
+}
+function circle(x, y, r, color) {
+  X.beginPath(); X.arc(x, y, r, 0, Math.PI * 2); X.fillStyle = css(color); X.fill();
+}
+function font(size, bold) { return `${bold ? 700 : 400} ${Math.round(size)}px ${FONT}`; }
+// 文字：anchor = 垂直(t/m/b) + 水平(l/c/r)；maxW 自動縮小字級避免溢出
+function txt(s, x, y, o) {
+  o = o || {};
+  let size = o.size || 14; const bold = !!o.bold, a = o.anchor || 'tl';
+  X.font = font(size, bold);
+  if (o.maxW) { while (size > 9 && X.measureText(s).width > o.maxW) { size--; X.font = font(size, bold); } }
+  X.textBaseline = { t: 'top', m: 'middle', b: 'bottom' }[a[0]];
+  X.textAlign = { l: 'left', c: 'center', r: 'right' }[a[1]];
+  X.globalAlpha = o.alpha === undefined ? 1 : o.alpha;
+  X.fillStyle = css(o.color || C_TEXT);
+  X.fillText(s, x, y);
+  X.globalAlpha = 1;
+}
+function textW(s, size, bold) { X.font = font(size, bold); return X.measureText(s).width; }
+function wrap(text, size, bold, maxw) {
+  X.font = font(size, bold);
+  const lines = []; let cur = '';
+  for (const ch of text) {
+    if (ch === '\n') { lines.push(cur); cur = ''; }
+    else if (X.measureText(cur + ch).width <= maxw) cur += ch;
+    else { lines.push(cur); cur = ch; }
+  }
+  if (cur || !lines.length) lines.push(cur);
+  return lines;
+}
+
+// 柔和環境陰影：離屏快取，只繪於卡片外側（毛玻璃內部保持通透）
+const shadowCache = new Map();
+function getShadow(w, h, rad) {
+  const key = w + 'x' + h + 'x' + rad;
+  let c = shadowCache.get(key);
+  if (!c) {
+    if (shadowCache.size > 200) shadowCache.clear();
+    const PAD = 40;
+    c = document.createElement('canvas'); c.width = w + PAD * 2; c.height = h + PAD * 2;
+    const g = c.getContext('2d');
+    g.beginPath(); g.rect(0, 0, c.width, c.height);
+    // 內部鏤空，確保陰影只出現在卡片外側
+    const r = Math.max(0, Math.min(rad, w / 2, h / 2)), x = PAD, y = PAD;
+    g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+    g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+    g.clip('evenodd');
+    g.shadowColor = 'rgba(0,0,0,0.55)'; g.shadowBlur = 26; g.shadowOffsetY = 8;
+    g.beginPath();
+    g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+    g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+    g.fillStyle = '#000'; g.fill();
+    shadowCache.set(key, c);
+  }
+  return c;
+}
+// 深色毛玻璃卡片：多層陰影 + 半透明底 + 細緻發光邊框 + 頂部高光
+function drawGlassCard(q, rad, border, bg, shadow) {
+  rad = rad === undefined ? 16 : rad;
+  border = border === undefined ? BORDER : border;
+  bg = bg || CARD_BG;
+  if (shadow !== false) X.drawImage(getShadow(Math.round(q.w), Math.round(q.h), rad), q.x - 40, q.y - 40);
+  fillRR(bg, q, rad, border, 1);
+  const g = X.createLinearGradient(0, q.y, 0, q.y + q.h * 0.45);
+  g.addColorStop(0, 'rgba(255,255,255,0.07)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+  rrPath(q.x + 1, q.y + 1, q.w - 2, q.h - 2, rad); X.fillStyle = g; X.fill();
+}
+// 呼吸燈光暈（以 shadowBlur 繪製外發光）
+function drawGlow(q, rad, color, strength) {
+  strength = clamp(strength, 0, 1);
+  if (strength <= 0.01) return;
+  X.save();
+  X.shadowColor = css(color, Math.min(1, 0.25 + strength * 0.75));
+  X.shadowBlur = 10 + 26 * strength;
+  rrPath(q.x, q.y, q.w, q.h, rad);
+  X.lineWidth = 2; X.strokeStyle = css(color, 0.35 + 0.5 * strength); X.stroke();
+  X.restore();
+}
+
+// 靜態背景（離屏）：slate-950 + 點陣 + 彩色光暈 + 毛玻璃頂欄
+function buildBackground() {
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  g.fillStyle = css(C_BG); g.fillRect(0, 0, W, H);
+  g.fillStyle = 'rgb(24,32,48)';
+  for (let x = 16; x < W; x += 32) for (let y = 16; y < H; y += 32) g.fillRect(x, y, 1.5, 1.5);
+  const blobs = [[[56,189,248],160,110,380,0.16],[[129,140,248],1120,120,320,0.15],
+                 [[244,114,182],980,760,350,0.11],[[52,211,153],180,740,280,0.09],[[251,146,60],640,420,260,0.05]];
+  for (const [col, cx, cy, r, a] of blobs) {
+    const rg = g.createRadialGradient(cx, cy, 0, cx, cy, r);
+    rg.addColorStop(0, `rgba(${col[0]},${col[1]},${col[2]},${a})`);
+    rg.addColorStop(1, `rgba(${col[0]},${col[1]},${col[2]},0)`);
+    g.fillStyle = rg; g.fillRect(0, 0, W, H);
+  }
+  g.fillStyle = css(C_PANEL); g.fillRect(0, 0, W, TOP_H);
+  g.fillStyle = 'rgba(255,255,255,0.04)'; g.fillRect(0, 0, W, TOP_H / 2);
+  g.fillStyle = 'rgb(51,65,85)'; g.fillRect(0, TOP_H - 1, W, 1);
+  return c;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 四、資料模型
+// ════════════════════════════════════════════════════════════════
+class Tile {
+  constructor(idx, kind, name, group, price, sub) {
+    this.idx = idx; this.kind = kind; this.name = name; this.group = group;
+    this.price = price; this.sub = sub;
+    this.owner = null;   // 地主（拿 70%）
+    this.share = null;   // 30% 小股東
+  }
+}
+class Player {
+  constructor(idx, name, short, color, human, persona) {
+    this.idx = idx; this.name = name; this.short = short; this.color = color;
+    this.isHuman = human; this.persona = persona; this.reset();
+  }
+  reset() {
+    this.cash = START_CASH; this.cashDisp = START_CASH;
+    this.pos = 0; this.disp = 0; this.start = 0;
+    this.used = [false, false, false, false];   // 步數卡是否冷卻中
+    this.choice = null; this.locked = false; this.passed = false; this.think = 5;
+    this.status = ['等待開始', C_SUB];
+  }
+}
+function buildTiles() {
+  const t = [];
+  for (let i = 0; i < 16; i++) {
+    if (CORNERS[i]) t.push(new Tile(i, 'corner', CORNERS[i][0], null, 0, CORNERS[i][1]));
+    else { const [n, g, p] = PROPS[i]; t.push(new Tile(i, 'prop', n, g, p, '')); }
+  }
+  return t;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 五、遊戲主體
+// ════════════════════════════════════════════════════════════════
+class Game {
+  constructor() {
+    this.bg = buildBackground();
+    this.mouse = { x: -1, y: -1 };
+    this.dt = 1 / 60; this.time = 0;
+    this.hover = {}; this.buttons = [];
+    this.state = 'title';
+    this.setupWorld();
+  }
+
+  // ───────────── 初始化 ─────────────
+  setupWorld() {
+    this.tiles = buildTiles();
+    this.groupTiles = [0, 1, 2, 3].map(g => this.tiles.filter(t => t.group === g));
+    this.players = PLAYER_DEFS.map((d, i) => new Player(i, ...d));
+    this.round = 1; this.phase = 'TITLE';
+    this.chat = []; this.sched = []; this.toasts = []; this.toastGate = {};
+    this.hub = null; this.anim = null; this.flow = null; this.wait = null;
+    this.planT = PLAN_TIME; this.planElapsed = 0; this.selected = null;
+    this.focusTile = null; this.focusColor = C_SKY; this.focusIdx = new Set();
+    this.final = null;
+  }
+  newGame() {
+    this.setupWorld();
+    this.state = 'play';
+    this.sys('歡迎來到 CAPITAL PULSE v2！4 位玩家已連線。');
+    this.sys('—— 第 1 回合開始 ——');
+    this.flow = this.gameFlow();
+  }
+
+  // ───────────── 聊天室 ─────────────
+  sys(text, color) { this._push({ kind: 'sys', text, color: color || C_SUB }); }
+  meSay(text, delay) { this.sched.push([this.time + (delay === undefined ? 0.2 : delay), { kind: 'me', text }]); }
+  // AI 以深色對話氣泡吐出台詞（key 對應台詞庫，否則視為原文）
+  say(p, keyOrText, delay) {
+    if (p.isHuman) return;
+    const text = LINES[keyOrText] ? pick(LINES[keyOrText]) : keyOrText;
+    this.sched.push([this.time + (delay === undefined ? 0.5 : delay) + rnd(0, 0.4), { kind: 'ai', text, p: p.idx }]);
+  }
+  _push(m) {
+    m.t0 = this.time; m.layout = null;
+    this.chat.push(m);
+    if (this.chat.length > 60) this.chat.shift();
+  }
+  chatLayout(m) {
+    if (m.layout) return m.layout;
+    let L;
+    if (m.kind === 'sys') {
+      const lines = wrap(m.text, 12, false, 232);
+      const tw = Math.max(...lines.map(l => textW(l, 12, false))) + 22;
+      L = { lines, tw, h: lines.length * 16 + 12 };
+    } else {
+      const lines = wrap(m.text, 14, false, 194);
+      const tw = Math.max(...lines.map(l => textW(l, 14, false)));
+      const top = m.kind === 'ai' ? 16 : 0, bw = tw + 26, bh = lines.length * 20 + 14;
+      L = { lines, bw, bh, top, h: top + bh + 2 };
+    }
+    m.layout = L; return L;
+  }
+
+  // ───────────── 金錢 / 飄字 ─────────────
+  // 玩家卡片與棋盤格上方各浮現一則往上飄動並漸隱的 + $300 / - $600
+  toast(idx, amount, tile) {
+    const p = this.players[idx];
+    const t = tile === undefined || tile === null ? p.pos : tile;
+    const text = (amount > 0 ? '+ $' : '- $') + fmt(Math.abs(amount));
+    const col = amount > 0 ? C_GREEN : C_RED;
+    const cr = this.cardRect(idx), tr = this.tileRect(t);
+    for (const [ax, ay, key] of [[cr.r - 44, cr.y + 52, 'c' + idx], [tr.cx, tr.y + 24, 't' + t]]) {
+      const start = Math.max(this.time, this.toastGate[key] || 0);
+      this.toastGate[key] = start + 0.45;
+      this.toasts.push({ text, color: col, ax, ay, start, life: 1.7 });
+    }
+  }
+  take(p, amt, tile) {
+    amt = Math.floor(Math.min(amt, p.cash)); p.cash -= amt;
+    if (amt > 0) this.toast(p.idx, -amt, tile);
+    return amt;
+  }
+  give(idx, amt, tile) {
+    amt = Math.floor(amt); this.players[idx].cash += amt;
+    if (amt > 0) this.toast(idx, amt, tile);
+  }
+  canSpend(p, amt) { return p.cash - amt >= RESERVE; }
+  setStatus(p, text, color) { p.status = [text, color || C_SUB]; }
+
+  // ───────────── 地產規則 ─────────────
+  hasMonopoly(owner, g) { return this.groupTiles[g].every(t => t.owner === owner); }
+  completesMonopoly(idx, tile) { return this.groupTiles[tile.group].every(t => t === tile || t.owner === idx); }
+  rentOf(tile) {
+    const base = Math.round(tile.price * 0.4);
+    if (tile.owner !== null && this.hasMonopoly(tile.owner, tile.group)) return Math.round(base * MONO_MULT);
+    return base;
+  }
+  halfValue(tile) { return Math.round(tile.price * SHARE_COST); }
+  props(p) { return this.tiles.filter(t => t.kind === 'prop' && t.owner === p.idx); }
+  shares(p) { return this.tiles.filter(t => t.kind === 'prop' && t.share === p.idx); }
+  netWorth(p) {
+    return p.cash + this.props(p).reduce((s, t) => s + t.price, 0) + this.shares(p).reduce((s, t) => s + this.halfValue(t), 0);
+  }
+  assetRows() {
+    return this.players.map(p => {
+      const prop = this.props(p).reduce((s, t) => s + t.price, 0);
+      const share = this.shares(p).reduce((s, t) => s + this.halfValue(t), 0);
+      return { p, cash: p.cash, prop, share, net: p.cash + prop + share };
+    }).sort((a, b) => b.net - a.net);
+  }
+  checkEnd() {
+    for (const p of this.players) if (p.cash <= 0) return `${p.name} 現金歸零破產，遊戲提前結束`;
+    return null;
+  }
+
+  // ───────────── 版面座標 ─────────────
+  tileRect(i) { const [cx, cy] = RING[((i % 16) + 16) % 16]; return R(BOARD_X + cx * (CELL + GAP), BOARD_Y + cy * (CELL + GAP), CELL, CELL); }
+  cardRect(idx) { return R(LEFT_X, CONTENT_Y + idx * 182, LEFT_W, 170); }
+  laneXY(tile, k) { const r = this.tileRect(tile); return [r.x + 22 + k * 28, r.y + 108]; }
+  tokenXY(p) {
+    const f = ((p.disp % 16) + 16) % 16, i = Math.floor(f) % 16, fr = f - Math.floor(f);
+    const a = this.laneXY(i, p.idx), b = this.laneXY((i + 1) % 16, p.idx);
+    return [lerp(a[0], b[0], fr), lerp(a[1], b[1], fr) - Math.sin(Math.PI * fr) * 9];   // 棋子跳躍弧線
+  }
+
+  // ───────────── AI 決策 ─────────────
+  // 該玩家本回合開始時的手牌（可由出牌紀錄推理，不洩漏本回合選擇）
+  handBefore(q) {
+    const r = [];
+    for (let k = 0; k < 4; k++) if (!q.used[k] || (q.locked && q.choice === k + 1)) r.push(k);
+    return r;
+  }
+  rivalReach(p, tpos) {
+    let n = 0;
+    for (const q of this.players) {
+      if (q === p) continue;
+      if (this.handBefore(q).some(k => (q.pos + k + 1) % 16 === tpos)) n++;
+    }
+    return n;
+  }
+  aiPickCard(p) {
+    let best = null, bs = -1e9;
+    for (let k = 0; k < 4; k++) {
+      if (p.used[k]) continue;
+      const steps = k + 1, tp = (p.pos + steps) % 16, tile = this.tiles[tp];
+      let s = rnd(0, 0.9);
+      if (p.pos + steps >= 16) s += 1.0;
+      if (tile.kind === 'prop') {
+        if (tile.owner === null) {
+          if (p.cash >= tile.price + 400) s += 1.4;
+          if (this.completesMonopoly(p.idx, tile)) s += 2.2;
+          s -= 0.25 * this.rivalReach(p, tp) * (1 - p.persona.agg);   // 撞格會平分，保守型 AI 略有折扣
+        } else if (tile.owner === p.idx) s += 0.2;
+        else s -= 0.6 + this.rentOf(tile) / 350;
+      } else if (tp === 4) s += 1.1;
+      else if (tp === 12) s -= 1.4;
+      else if (tp === 8) s += 0.5;
+      if (s > bs) { best = steps; bs = s; }
+    }
+    return best;
+  }
+
+  // ───────────── 狀態機：總流程（generator，逐幀推進） ─────────────
+  *gameFlow() {
+    for (;;) {
+      yield* this.phasePlan();
+      yield* this.phaseMove();
+      yield* this.phaseResolve();
+      const reason = this.checkEnd();
+      if (reason || this.round >= MAX_ROUND) { yield* this.phaseFinal(reason || '完成 12 回合'); return; }
+      this.round++;
+      this.sys(`—— 第 ${this.round} 回合開始 ——`);
+    }
+  }
+  setHub(hub) { if (hub.age === undefined) hub.age = 0; hub.fade = 0; this.hub = hub; }
+  // 顯示互動視窗並等待玩家選擇（或倒數逾時）
+  *ask(hub) {
+    hub.choice = null; this.setHub(hub);
+    yield () => hub.choice !== null;
+    return hub.choice;
+  }
+  *show(hub, secs) { this.setHub(hub); yield secs; }
+  info(title, sub, lines, tile, accent) {
+    return { mode: 'event', title, sub: sub || '', lines: lines || [], tile: tile === undefined ? null : tile,
+             accent: accent || C_TEXT, buttons: [], stagger: true };
+  }
+
+  // ───────────── 階段一：同步出牌 ─────────────
+  *phasePlan() {
+    this.phase = 'PLAN';
+    for (const p of this.players) {
+      if (p.used.every(Boolean)) p.used = [false, false, false, false];   // 4 張出完 → 自動重置
+      p.choice = null; p.locked = false; p.passed = false;
+      this.setStatus(p, '思考中...', C_SUB);
+      if (!p.isHuman) p.think = rnd(1.5, 7.0);
+    }
+    this.planT = PLAN_TIME; this.planElapsed = 0; this.selected = null;
+    this.focusTile = null; this.focusIdx = new Set();
+    this.setHub({ mode: 'plan' });
+    yield () => this.planT <= 0 || this.players.every(p => p.locked);
+    if (!this.players[0].locked) this.lockHuman();
+    for (const ai of this.players.slice(1)) if (!ai.locked) this.lockAI(ai);
+    yield 0.3;
+  }
+  lockHuman() {
+    const h = this.players[0];
+    if (h.locked) return;
+    if (this.selected === null) {                       // 逾時自動選一張
+      const free = [0, 1, 2, 3].filter(k => !h.used[k]);
+      this.selected = pick(free);
+    }
+    h.choice = this.selected + 1; h.used[this.selected] = true; h.locked = true;
+    this.setStatus(h, '已鎖定步數', C_GREEN);
+    for (const ai of this.players.slice(1))             // 零空閒：其餘 AI 很快跟進
+      if (!ai.locked) ai.think = Math.min(ai.think, this.planElapsed + rnd(0.3, 1.2));
+  }
+  lockAI(ai) {
+    const c = this.aiPickCard(ai);
+    ai.choice = c; ai.used[c - 1] = true; ai.locked = true;
+    this.setStatus(ai, '已鎖定步數', C_GREEN);
+  }
+  *phaseMove() {
+    this.phase = 'MOVE';
+    for (const p of this.players) this.setStatus(p, '移動中', p.color);
+    this.setHub({ mode: 'reveal' });
+    yield 1.5;
+    for (const p of this.players) p.start = p.pos;
+    this.anim = { t: 0, dur: 1.6 };
+    yield () => this.anim === null;
+    yield 0.25;
+  }
+
+  // ───────────── 階段二：全場即時干預 ─────────────
+  *phaseResolve() {
+    this.phase = 'RESOLVE';
+    for (const p of this.players) this.setStatus(p, '等待結算', C_SUB);
+    const lines = [];
+    for (const p of this.players) {
+      if (p.passed) {
+        this.give(p.idx, PASS_START, 0);
+        lines.push([`${p.name} 經過創投起點  + $${fmt(PASS_START)}`, C_GREEN]);
+        this.sys(`${p.name} 經過創投起點，領取 $${fmt(PASS_START)}`, C_GREEN);
+      }
+    }
+    if (lines.length) yield* this.show(this.info('創投起點紅利', '資金到位！', lines, 0, C_GREEN), 1.5);
+    const order = [];
+    for (const p of this.players) if (!order.includes(p.pos)) order.push(p.pos);
+    for (const t of order) {
+      const landers = this.players.filter(p => p.pos === t);
+      this.focusTile = t; this.focusColor = landers[0].color; this.focusIdx = new Set(landers.map(p => p.idx));
+      yield* this.resolveTile(this.tiles[t], landers);
+      this.focusTile = null; this.focusIdx = new Set();
+    }
+    for (const p of this.players) this.setStatus(p, '本回合結束', C_SUB);
+    this.hub = { mode: 'idle', age: 0, fade: 0 };
+    yield 0.4;
+  }
+  *resolveTile(tile, landers) {
+    if (tile.kind === 'corner') yield* this.cornerEvent(tile, landers);
+    else if (tile.owner !== null) yield* this.rentEvent(tile, landers);
+    else if (landers.length >= 2) yield* this.splitEvent(tile, landers);
+    else if (landers[0].isHuman) yield* this.humanBuy(tile, landers[0]);
+    else yield* this.aiBuy(tile, landers[0]);
+  }
+  *cornerEvent(tile, landers) {
+    const t = tile.idx, lines = []; let accent;
+    if (t === 0) { lines.push(['起點紅利已於經過時發放', C_SUB]); accent = C_GREEN; }
+    else if (t === 4) {
+      for (const p of landers) {
+        this.give(p.idx, INTEL_BONUS);
+        lines.push([`${p.name} 抽中內線紅利  + $${fmt(INTEL_BONUS)}`, C_GREEN]);
+        this.sys(`${p.name} 在情報局抽中紅利 $${fmt(INTEL_BONUS)}`, C_GREEN);
+        this.say(p, 'bonus', 0.6);
+      }
+      accent = C_SKY;
+    } else if (t === 8) {
+      for (const p of landers) lines.push([`${p.name} 在安全港休息，免除一切風險`, C_INDIGO]);
+      accent = C_INDIGO;
+    } else {
+      for (const p of landers) {
+        const paid = this.take(p, AUDIT_TAX);
+        lines.push([`${p.name} 被稽查處罰款  - $${fmt(paid)}`, C_RED]);
+        this.sys(`${p.name} 被稽查處罰款 $${fmt(paid)}`, C_RED);
+      }
+      accent = C_RED;
+    }
+    yield* this.show(this.info(tile.name, tile.sub, lines, t, accent), 1.8);
+  }
+  *rentEvent(tile, landers) {
+    const owner = this.players[tile.owner];
+    const sh = tile.share !== null ? this.players[tile.share] : null;
+    const payers = landers.filter(p => p.idx !== owner.idx);
+    if (!payers.length) {
+      if (owner.isHuman) yield* this.show(this.info('巡視自有地產', '這裡是你的地盤', [], tile.idx), 1.1);
+      return;
+    }
+    const rent = this.rentOf(tile), mono = this.hasMonopoly(owner.idx, tile.group), lines = [];
+    for (const p of payers) {
+      const paid = this.take(p, rent);
+      const oamt = sh ? Math.round(paid * (1 - SHARE_PCT)) : paid, samt = paid - oamt;
+      this.give(owner.idx, oamt, tile.idx);
+      lines.push([`${p.name} 支付過路費  - $${fmt(paid)}`, C_RED]);
+      lines.push([`地主 ${owner.name}  + $${fmt(oamt)}` + (sh ? '（70%）' : ''), C_GREEN]);
+      this.sys(`${p.name} 在「${tile.name}」支付過路費 $${fmt(paid)}`, C_RED);
+      if (sh) {
+        this.give(sh.idx, samt, tile.idx);
+        lines.push([`小股東 ${sh.name}  + $${fmt(samt)}（30% 分紅）`, C_GREEN]);
+        this.sys(`${sh.name} 以小股東身份分紅 $${fmt(samt)}`, C_GREEN);
+        if (sh.isHuman) this.meSay('入股的分紅進帳了！', 1.0); else this.say(sh, '躺著分紅，真香！', 0.9);
+      }
+      this.say(owner, 'rent_get', 0.6); this.say(p, 'rent_pay', 1.2);
+      this.setStatus(owner, '收租中', C_GREEN); this.setStatus(p, '繳過路費', C_RED);
+    }
+    const sub = `${tile.name} · 過路費 $${fmt(rent)}` + (mono ? ' · 壟斷 ×2' : '');
+    yield* this.show(this.info(sh ? '雙重分紅結算' : '過路費結算', sub, lines, tile.idx), 2.6);
+  }
+  finishPurchaseNote(ownerP, tile) {
+    if (this.hasMonopoly(ownerP.idx, tile.group)) {
+      this.sys(`壟斷成立！${ownerP.name} 集齊「${GROUPS[tile.group][0]}」，過路費 ×2`, C_RED);
+      this.say(ownerP, 'monopoly', 0.9);
+    }
+  }
+  // 撞格＝平分產權：兩位玩家各付 50%，一人地主（70%）、一人小股東（30%）
+  *splitEvent(tile, landers) {
+    const price = tile.price, half = this.halfValue(tile);
+    this.sys(`${landers.map(p => p.name).join('、')} 同時踩進「${tile.name}」，平分產權！`, C_ORANGE);
+    for (const p of landers) { this.say(p, 'collide', 0.4); this.setStatus(p, '撞格！', C_ORANGE); }
+    const elig = landers.filter(p => this.canSpend(p, half)), lines = []; let accent;
+    if (elig.length >= 2) {
+      const pair = sample2(elig);                        // 3 人以上撞格：系統抽籤選出 2 位
+      const owner = pair[0], sh = pair[1];
+      this.take(owner, half, tile.idx); this.take(sh, half, tile.idx);
+      tile.owner = owner.idx; tile.share = sh.idx;
+      lines.push([`${owner.name} 付 $${fmt(half)} → 地主（70%）`, C_TEXT]);
+      lines.push([`${sh.name} 付 $${fmt(half)} → 小股東（30%）`, C_GREEN]);
+      for (const p of landers) if (!pair.includes(p)) {
+        lines.push([`${p.name} 未抽中，無法參與`, C_SUB]);
+        this.setStatus(p, '未獲產權', C_SUB); this.say(p, 'split_lose', 1.0);
+      }
+      this.setStatus(owner, '共享地主', C_GREEN); this.setStatus(sh, '共享股東', C_GREEN);
+      this.sys(`${owner.name} 成為地主，${sh.name} 成為 30% 小股東`, C_GREEN);
+      for (const p of pair) { if (p.isHuman) this.meSay('平分產權，一起賺！', 0.2); else this.say(p, 'split', 0.7); }
+      this.finishPurchaseNote(owner, tile);
+      accent = C_GREEN;
+    } else if (elig.length === 1 && this.canSpend(elig[0], price)) {
+      const w = elig[0];
+      this.take(w, price, tile.idx); tile.owner = w.idx;
+      lines.push([`只有 ${w.name} 付得起，原價 $${fmt(price)} 獨得此地`, C_TEXT]);
+      this.sys(`${w.name} 獨得「${tile.name}」`);
+      this.finishPurchaseNote(w, tile);
+      accent = C_TEXT;
+    } else {
+      lines.push(['無人付得起，流標', C_SUB]);
+      this.sys('流標，無人買下這塊地。');
+      accent = C_SUB;
+    }
+    yield* this.show(this.info('平分產權！', `${tile.name} · 底價 $${fmt(price)}`, lines, tile.idx, accent), 3.0);
+  }
+  // AI 單獨踩進空地：5 秒全場干預窗口（半價入股 / 雙倍攔截 / 放行）
+  *aiBuy(tile, buyer) {
+    const price = tile.price, mono = this.completesMonopoly(buyer.idx, tile);
+    let wants = buyer.cash - price >= 500 || (mono && this.canSpend(buyer, price));
+    if (wants && Math.random() < 0.08) wants = false;
+    if (!wants || !this.canSpend(buyer, price)) {
+      this.sys(`${buyer.name} 資金吃緊，放棄購買「${tile.name}」`);
+      this.setStatus(buyer, '放棄購買', C_SUB);
+      yield* this.show(this.info('放棄購買', `${buyer.name} 決定不買下此地`, [], tile.idx), 1.0);
+      return;
+    }
+    const human = this.players[0];
+    const scost = this.halfValue(tile), icost = Math.round(price * INTERCEPT_COST);
+    this.setStatus(buyer, '準備買地', buyer.color);
+    const lines = [];
+    if (mono) lines.push([`警告：讓他買下就湊齊「${GROUPS[tile.group][0]}」壟斷，過路費 ×2！`, C_RED]);
+    else lines.push([`你的現金：$${fmt(human.cash)}`, C_SUB]);
+    const hub = { mode: 'event', title: '全場即時干預', sub: `${buyer.name} 正在以原價 $${fmt(price)} 買下這塊地`,
+      lines, tile: tile.idx, accent: C_TEXT, stagger: false, tTotal: 5, tLeft: 5,
+      buttons: [
+        { key: 'share', label: `半價入股 30% · 付 $${fmt(scost)}`, color: C_GREEN, enabled: this.canSpend(human, scost), style: 'solid' },
+        { key: 'intercept', label: `雙倍攔截 · 付 $${fmt(icost)}`, color: C_RED, enabled: this.canSpend(human, icost), style: 'solid' },
+        { key: 'pass', label: '放行觀望', color: C_SUB, enabled: true, style: 'glass' }] };
+    const choice = yield* this.ask(hub);
+    let interceptor = null, sharer = null;
+    if (choice === 'share') sharer = human;
+    else if (choice === 'intercept') interceptor = human;
+    else {                                              // 玩家放行 → AI 們可能出手
+      const others = this.players.slice(1).filter(p => p !== buyer);
+      if (mono) {
+        const c = others.filter(p => p.cash >= icost + RESERVE && Math.random() < 0.35 + 0.3 * p.persona.agg);
+        if (c.length) interceptor = c.reduce((a, b) => (b.cash > a.cash ? b : a));
+      }
+      if (!interceptor) {
+        const c = others.filter(p => p.cash >= scost + 600 && Math.random() < 0.2 + 0.25 * p.persona.share);
+        if (c.length) sharer = pick(c);
+      }
+    }
+    const out = []; let accent;
+    if (interceptor) {
+      this.take(interceptor, icost, tile.idx);
+      tile.owner = interceptor.idx; tile.share = null;
+      this.setStatus(interceptor, '發動攔截！', C_RED); this.setStatus(buyer, '被攔截了', C_RED);
+      out.push([`${interceptor.name} 雙倍攔截，付 $${fmt(icost)} 買斷「${tile.name}」`, C_RED]);
+      out.push([`${buyer.name} 的買地計畫落空`, C_SUB]);
+      this.sys(`${interceptor.name} 雙倍攔截了 ${buyer.name} 的買地！`, C_RED);
+      if (interceptor.isHuman) this.meSay('雙倍攔截！這塊歸我了。', 0.2); else this.say(interceptor, 'intercept', 0.4);
+      this.say(buyer, 'intercepted', 1.1);
+      this.finishPurchaseNote(interceptor, tile);
+      accent = C_RED;
+    } else {
+      this.take(buyer, price, tile.idx); tile.owner = buyer.idx;
+      this.setStatus(buyer, '買下地產', C_GREEN);
+      out.push([`${buyer.name} 以 $${fmt(price)} 買下「${tile.name}」`, C_TEXT]);
+      this.sys(`${buyer.name} 買下了「${tile.name}」`);
+      accent = C_TEXT;
+      if (sharer) {
+        this.take(sharer, scost, tile.idx); tile.share = sharer.idx;
+        this.setStatus(sharer, '入股 30%！', C_GREEN);
+        out.push([`${sharer.name} 半價入股 30%（付 $${fmt(scost)}）`, C_GREEN]);
+        this.sys(`${sharer.name} 半價入股「${tile.name}」30%！`, C_GREEN);
+        if (sharer.isHuman) this.meSay('半價入股成功，躺著分紅囉！', 0.2); else this.say(sharer, 'share_ai', 0.4);
+        this.say(buyer, 'got_shared', 1.1);
+        accent = C_GREEN;
+      }
+      this.finishPurchaseNote(buyer, tile);
+    }
+    yield* this.show(this.info('交易結果', tile.name, out, tile.idx, accent), 2.2);
+  }
+  // 真人單獨踩進空地：原價購買或放棄；AI 可能半價入股搭便車，或在你快壟斷時雙倍攔截
+  *humanBuy(tile, human) {
+    const price = tile.price;
+    if (!this.canSpend(human, price)) {
+      this.sys('你的現金不足，無法購買這塊地。', C_RED);
+      yield* this.show(this.info('現金不足', `買下「${tile.name}」需要 $${fmt(price)}`, [], tile.idx, C_RED), 1.5);
+      return;
+    }
+    const mono = this.completesMonopoly(0, tile);
+    const lines = [[`買下後現金剩餘 $${fmt(human.cash - price)}`, C_SUB]];
+    if (mono) lines.unshift([`買下即湊齊「${GROUPS[tile.group][0]}」壟斷，過路費 ×2！`, C_GREEN]);
+    this.setStatus(human, '決策中', C_SKY);
+    const hub = { mode: 'event', title: '是否購買這塊地？', sub: `只有你踩進這塊無主地段，原價 $${fmt(price)}`,
+      lines, tile: tile.idx, accent: C_TEXT, stagger: false, tTotal: 8, tLeft: 8,
+      buttons: [{ key: 'buy', label: `原價購買 · $${fmt(price)}`, color: C_SKY, enabled: true, style: 'solid' },
+                { key: 'pass', label: '放棄', color: C_SUB, enabled: true, style: 'glass' }] };
+    const choice = yield* this.ask(hub);
+    if (choice !== 'buy') { this.sys('你放棄了這塊地。'); this.setStatus(human, '放棄購買', C_SUB); return; }
+    this.meSay('這塊我買了！', 0.1);
+    const scost = this.halfValue(tile), icost = Math.round(price * INTERCEPT_COST);
+    const ais = shuffle(this.players.slice(1));
+    let interceptor = null, sharer = null;
+    if (mono) {
+      const c = ais.filter(p => p.cash >= icost + RESERVE && Math.random() < 0.3 + 0.3 * p.persona.agg);
+      if (c.length) interceptor = c.reduce((a, b) => (b.cash > a.cash ? b : a));
+    }
+    if (!interceptor) {
+      for (const p of ais) if (p.cash >= scost + 500 && Math.random() < 0.3 * (1 + p.persona.share)) { sharer = p; break; }
+    }
+    const out = []; let accent;
+    if (interceptor) {
+      this.take(interceptor, icost, tile.idx); tile.owner = interceptor.idx;
+      this.setStatus(interceptor, '發動攔截！', C_RED); this.setStatus(human, '被攔截了', C_RED);
+      out.push([`${interceptor.name} 雙倍攔截，付 $${fmt(icost)} 搶走「${tile.name}」`, C_RED]);
+      out.push(['你尚未扣款，這塊地被搶走了', C_SUB]);
+      this.sys(`${interceptor.name} 雙倍攔截了你的買地！`, C_RED);
+      this.say(interceptor, 'intercept', 0.4);
+      accent = C_RED;
+    } else {
+      this.take(human, price, tile.idx); tile.owner = 0;
+      this.setStatus(human, '買下地產', C_GREEN);
+      out.push([`你買下了「${tile.name}」`, C_GREEN]);
+      this.sys(`你買下了「${tile.name}」`, C_GREEN);
+      accent = C_GREEN;
+      if (sharer) {
+        this.take(sharer, scost, tile.idx); tile.share = sharer.idx;
+        this.setStatus(sharer, '入股 30%！', C_GREEN);
+        out.push([`${sharer.name} 半價入股 30%（付 $${fmt(scost)}）`, C_ORANGE]);
+        this.sys(`${sharer.name} 對你的地產半價入股 30%！`, C_ORANGE);
+        this.say(sharer, 'share_ai', 0.4);
+      }
+      this.finishPurchaseNote(human, tile);
+    }
+    yield* this.show(this.info('交易結果', tile.name, out, tile.idx, accent), 2.2);
+  }
+  *phaseFinal(reason) {
+    this.phase = 'OVER';
+    this.hub = { mode: 'idle', age: 0, fade: 0 };
+    this.final = { reason, rows: this.assetRows(), t: 0 };
+    this.sys('遊戲結束，最終財報出爐！', C_SKY);
+    yield () => false;
+  }
+
+  // ───────────── 輸入 ─────────────
+  onKey(key) {
+    const h = this.players[0];
+    if (key === 'start' || key === 'replay' || key === 'restart') this.newGame();
+    else if (key.startsWith('card')) {
+      const k = parseInt(key.slice(4), 10);
+      if (this.phase === 'PLAN' && !h.locked && !h.used[k]) this.selected = k;
+    } else if (key === 'confirm') {
+      if (this.phase === 'PLAN' && !h.locked && this.selected !== null) this.lockHuman();
+    } else if (key.startsWith('ev:')) {
+      if (this.hub && this.hub.choice === null) this.hub.choice = key.slice(3);
+    }
+  }
+  handleClick(pos) {
+    for (let i = this.buttons.length - 1; i >= 0; i--) {
+      const [key, q] = this.buttons[i];
+      if (hit(q, pos)) { this.onKey(key); return; }
+    }
+  }
+  keydown(e) {
+    if (this.state === 'title') { if (e.key === 'Enter' || e.key === ' ') { this.onKey('start'); e.preventDefault(); } return; }
+    if (this.final) { if (e.key === 'Enter') this.onKey('replay'); return; }
+    if (['1', '2', '3', '4'].includes(e.key)) this.onKey('card' + (parseInt(e.key, 10) - 1));
+    else if (e.key === 'Enter') this.onKey('confirm');
+  }
+
+  // ───────────── 更新 ─────────────
+  update(dt) {
+    this.dt = dt; this.time += dt;
+    for (const p of this.players) {
+      const d = p.cash - p.cashDisp;
+      p.cashDisp = Math.abs(d) < 1 ? p.cash : p.cashDisp + d * Math.min(1, dt * 8);
+    }
+    const due = this.sched.filter(s => s[0] <= this.time);
+    if (due.length) {
+      this.sched = this.sched.filter(s => s[0] > this.time);
+      due.sort((a, b) => a[0] - b[0]);
+      for (const [, m] of due) this._push(Object.assign({}, m));
+    }
+    this.toasts = this.toasts.filter(t => this.time - t.start < t.life);
+    if (this.final) this.final.t += dt;
+    if (this.state !== 'play') return;
+    if (this.phase === 'PLAN') {
+      this.planT -= dt; this.planElapsed += dt;
+      for (const ai of this.players.slice(1)) if (!ai.locked && this.planElapsed >= ai.think) this.lockAI(ai);
+    }
+    if (this.anim) {
+      const a = this.anim; a.t += dt;
+      const q = Math.min(1, a.t / a.dur), e = easeOut(q);
+      for (const p of this.players) p.disp = p.start + p.choice * e;
+      if (q >= 1) {
+        for (const p of this.players) {
+          p.passed = p.start + p.choice >= 16;
+          p.pos = (p.start + p.choice) % 16; p.disp = p.pos;
+        }
+        this.anim = null;
+      }
+    }
+    if (this.hub) {
+      const hb = this.hub;
+      hb.age = (hb.age || 0) + dt;
+      hb.fade = Math.min(1, (hb.fade || 0) + dt * 5);
+      if (hb.tTotal !== undefined && hb.choice === null) {
+        hb.tLeft -= dt;
+        if (hb.tLeft <= 0) hb.choice = 'timeout';
+      }
+    }
+    for (let i = 0; i < 8; i++) {                        // 推進流程 generator
+      if (!this.flow) break;
+      const w = this.wait; let ok;
+      if (w === null || w === undefined) ok = true;
+      else if (typeof w === 'function') ok = w();
+      else { this.wait = w - dt; dt = 0; ok = this.wait <= 0; }
+      if (!ok) break;
+      const r = this.flow.next();
+      if (r.done) { this.flow = null; this.wait = null; break; }
+      this.wait = r.value;
+    }
+  }
+
+  // ═══════════════ 繪製：按鈕 / 標籤 ═══════════════
+  // 膠囊按鈕：Hover 時邊框點亮並微幅展開。solid＝亮色實心，glass＝半透明毛玻璃
+  pill(key, q, label, color, enabled, style, size) {
+    if (enabled === undefined) enabled = true;
+    const inside = enabled && hit(q, this.mouse);
+    let hv = this.hover[key] || 0;
+    hv += ((inside ? 1 : 0) - hv) * Math.min(1, this.dt * 16);
+    this.hover[key] = hv;
+    const r = infl(q, q.w * 0.05 * hv, q.h * 0.12 * hv), rad = r.h / 2;
+    let tc;
+    if (!enabled) { fillRR([51, 65, 85, 0.31], r, rad, [51, 65, 85, 0.47], 1); tc = C_MUTED; }
+    else if (style === 'solid') {
+      if (hv > 0.02) drawGlow(r, rad, color, hv);
+      fillRR(lighten(color, 14 * hv), r, rad); tc = C_BG;
+    } else {
+      fillRR(A(color, 0.13 + 0.16 * hv), r, rad, A(color, 0.43 + 0.57 * hv), 2);
+      tc = mix(color, C_TEXT, 0.35 + 0.4 * hv);
+    }
+    txt(label, r.cx, r.cy, { size: size || 16, color: tc, bold: true, anchor: 'mc', maxW: r.w - 22 });
+    if (enabled) this.buttons.push([key, q]);
+  }
+  // 狀態標籤：半透明色底 + 發光細邊框 + 彩色字的膠囊
+  tag(q, text, color, size) {
+    fillRR(A(color, 0.14), q, q.h / 2, A(color, 0.47), 1);
+    txt(text, q.cx, q.cy, { size: size || 12, color, bold: true, anchor: 'mc', maxW: q.w - 10 });
+  }
+
+  // ═══════════════ 繪製：頂部狀態列 ═══════════════
+  drawTopbar() {
+    txt('CAPITAL PULSE v2', 22, 7, { size: 20, bold: true });
+    txt('零等待極簡商戰', 23, 32, { size: 11, color: C_SUB });
+    if (this.state !== 'play') return;
+    let label, col;
+    if (this.phase === 'PLAN' || this.phase === 'MOVE') { label = '階段一：同步出牌'; col = C_SKY; }
+    else if (this.phase === 'RESOLVE') { label = '階段二：全場即時干預'; col = C_INDIGO; }
+    else { label = '終局：最終財報'; col = C_GREEN; }
+    const pr = R(W / 2 - 130, 6, 260, 26);
+    this.tag(pr, label, col, 14);
+    const pulse = 0.5 + 0.5 * Math.sin(this.time * 4);                 // 指示燈呼吸
+    circle(pr.x + 15, pr.cy, 4, mix(C_BG, col, 0.5 + 0.5 * pulse));
+    let ratio = 1;
+    if (this.phase === 'PLAN') ratio = clamp(this.planT / PLAN_TIME, 0, 1);
+    else if (this.phase === 'MOVE' && this.anim) ratio = 1 - this.anim.t / this.anim.dur;
+    else if (this.hub && this.hub.tTotal !== undefined && this.hub.choice === null) ratio = clamp(this.hub.tLeft / this.hub.tTotal, 0, 1);
+    const br = R(W / 2 - 130, 38, 260, 5);
+    fillRR([51, 65, 85], br, 2);
+    if (ratio > 0.02) fillRR(ratio > 0.25 ? col : C_RED, R(br.x, br.y, br.w * ratio, 5), 2);
+    const rb = R(W - 20 - 76, 12, 76, 28);
+    this.pill('restart', rb, '重開', C_SUB, true, 'glass', 13);
+    txt(`Round ${Math.min(this.round, MAX_ROUND)} / ${MAX_ROUND}`, rb.x - 16, TOP_H / 2, { size: 17, bold: true, anchor: 'mr' });
+  }
+
+  // ═══════════════ 繪製：左側玩家卡片 ═══════════════
+  drawPlayers() {
+    for (const p of this.players) {
+      const r = this.cardRect(p.idx);
+      drawGlassCard(r, 20);
+      if (this.focusIdx.has(p.idx)) drawGlow(r, 20, p.color, 0.5 + 0.5 * Math.sin(this.time * 5));
+      circle(r.x + 24, r.y + 25, 7, p.color);
+      txt(p.name + (p.isHuman ? '（你）' : ''), r.x + 38, r.y + 14, { size: 16, bold: true, maxW: 190 });
+      txt('$' + fmt(p.cashDisp), r.x + 16, r.y + 38, { size: 32, bold: true });
+      txt(`總估值  $${fmt(this.netWorth(p))}`, r.x + 16, r.y + 80, { size: 13, color: C_SUB });
+      txt(`獨佔地產 ${this.props(p).length}  ·  小股東股權 ${this.shares(p).length}`, r.x + 16, r.y + 99, { size: 13, color: C_SUB, maxW: r.w - 32 });
+      // 手牌池預覽：亮＝還在手上，暗＝冷卻中（對手還剩哪些步數一目了然）
+      txt('手牌', r.x + 16, r.y + 120, { size: 11, color: C_MUTED });
+      for (let k = 0; k < 4; k++) {
+        const cr = R(r.x + 16 + k * 35, r.y + 134, 30, 26);
+        if (p.used[k]) {
+          fillRR([30, 41, 59, 0.63], cr, 8, [51, 65, 85, 0.47], 1);
+          txt(String(k + 1), cr.cx, cr.cy, { size: 13, color: C_MUTED, bold: true, anchor: 'mc' });
+        } else {
+          fillRR(A(p.color, 0.16), cr, 8, A(p.color, 0.78), 1);
+          txt(String(k + 1), cr.cx, cr.cy, { size: 14, color: p.color, bold: true, anchor: 'mc' });
+        }
+      }
+      this.tag(R(r.r - 14 - 104, r.y + 135, 104, 24), p.status[0], p.status[1]);
+    }
+  }
+
+  // ═══════════════ 繪製：棋盤 ═══════════════
+  drawTile(i) {
+    const t = this.tiles[i], r = this.tileRect(i);
+    if (t.kind === 'corner') {
+      const [name, sub, col] = CORNERS[i];
+      drawGlassCard(r, 16, A(col, 0.35), A(col, 0.11));
+      const cx = r.cx, cy = r.y + 31;
+      circle(cx, cy, 18, col);
+      X.fillStyle = css(C_BG);
+      if (i === 0) {
+        X.beginPath(); X.moveTo(cx - 8, cy - 4); X.lineTo(cx + 2, cy - 4); X.lineTo(cx + 2, cy - 10);
+        X.lineTo(cx + 11, cy); X.lineTo(cx + 2, cy + 10); X.lineTo(cx + 2, cy + 4); X.lineTo(cx - 8, cy + 4); X.closePath(); X.fill();
+      } else if (i === 4) txt('i', cx, cy, { size: 22, color: C_BG, bold: true, anchor: 'mc' });
+      else if (i === 8) {
+        X.beginPath(); X.moveTo(cx - 9, cy - 9); X.lineTo(cx + 9, cy - 9); X.lineTo(cx + 9, cy + 2);
+        X.lineTo(cx, cy + 11); X.lineTo(cx - 9, cy + 2); X.closePath(); X.fill();
+      } else txt('%', cx, cy, { size: 20, color: C_BG, bold: true, anchor: 'mc' });
+      txt(name, r.cx, r.y + 58, { size: 15, bold: true, anchor: 'tc', maxW: r.w - 14 });
+      txt(sub, r.cx, r.y + 79, { size: 12, color: C_SUB, anchor: 'tc', maxW: r.w - 14 });
+    } else {
+      const [gname, gcol] = GROUPS[t.group];
+      drawGlassCard(r, 16);
+      X.save(); X.beginPath(); X.rect(r.x, r.y, r.w, 25); X.clip();   // 頂部產業色條
+      fillRR(gcol, r, 16); X.restore();
+      txt(gname, r.x + 11, r.y + 5, { size: 12, color: C_BG, bold: true });
+      txt(t.name, r.x + 11, r.y + 31, { size: 15, bold: true, maxW: r.w - 20 });
+      txt(`底價 $${fmt(t.price)}`, r.x + 11, r.y + 52, { size: 13, bold: true });
+      const mono = t.owner !== null && this.hasMonopoly(t.owner, t.group);
+      const rent = t.owner !== null ? this.rentOf(t) : Math.round(t.price * 0.4);
+      txt(`過路費 $${fmt(rent)}` + (mono ? ' ×2' : ''), r.x + 11, r.y + 69, { size: 12, color: mono ? C_RED : C_SUB });
+      if (t.owner !== null) {                                        // 地主 70% / 股 30% 徽章
+        const op = this.players[t.owner];
+        this.tag(R(r.x + 8, r.y + 86, 62, 16), t.share !== null ? '地主 70%' : '地主', op.color, 10);
+        if (t.share !== null) this.tag(R(r.x + 74, r.y + 86, 48, 16), '股 30%', this.players[t.share].color, 10);
+      }
+    }
+    if (this.focusTile === i) {                                      // 事件中的呼吸燈光暈
+      const pulse = 0.5 + 0.5 * Math.sin(this.time * 5.5);
+      drawGlow(r, 16, this.focusColor, 0.45 + 0.55 * pulse);
+      fillRR(null, r, 16, A(this.focusColor, 0.9), 2);
+    }
+  }
+  drawTokens() {
+    for (const p of this.players) {
+      const [x, y] = this.tokenXY(p), rad = p.isHuman ? 11 : 10;
+      X.beginPath(); X.ellipse(x, y + 14, 14, 4.5, 0, 0, Math.PI * 2); X.fillStyle = 'rgba(0,0,0,0.38)'; X.fill();
+      circle(x, y, rad + 2, C_TEXT); circle(x, y, rad, p.color);
+      txt(String(p.idx + 1), x, y, { size: 12, color: C_BG, bold: true, anchor: 'mc' });
+    }
+  }
+  drawBoard() {
+    for (let i = 0; i < 16; i++) this.drawTile(i);
+    this.drawHub();
+    this.drawTokens();
+  }
+
+  // ═══════════════ 繪製：中央互動中樞 ═══════════════
+  hubHeader(hub) {
+    const r = HUB;
+    if (hub.tile !== null && hub.tile !== undefined) {
+      const tile = this.tiles[hub.tile], chip = R(r.x + 24, r.y + 18, r.w - 48, 34);
+      fillRR([51, 65, 85, 0.47], chip, 17, [71, 85, 105, 0.59], 1);
+      const col = tile.kind === 'prop' ? GROUPS[tile.group][1] : CORNERS[hub.tile][2];
+      circle(chip.x + 18, chip.cy, 7, col);
+      txt(tile.name, chip.x + 34, chip.cy, { size: 15, bold: true, anchor: 'ml' });
+      txt(tile.kind === 'prop' ? `底價 $${fmt(tile.price)}` : tile.sub, chip.r - 16, chip.cy, { size: 13, color: C_SUB, anchor: 'mr' });
+    }
+    if (hub.tTotal !== undefined && hub.choice === null) {
+      const bar = R(r.x + 24, r.y + 59, r.w - 48, 4);
+      fillRR([51, 65, 85], bar, 2);
+      const ratio = clamp(hub.tLeft / hub.tTotal, 0, 1);
+      if (ratio > 0.03) fillRR(ratio > 0.3 ? C_SKY : C_RED, R(bar.x, bar.y, bar.w * ratio, 4), 2);
+    }
+    return r.y + 72;
+  }
+  drawHub() {
+    const r = HUB;
+    drawGlassCard(r, 26, BORDER, C_PANEL);
+    const hub = this.hub;
+    if (!hub || this.state !== 'play') return;
+    if (hub.mode === 'plan') this.drawHubPlan();
+    else if (hub.mode === 'reveal') this.drawHubReveal(hub);
+    else if (hub.mode === 'event') this.drawHubEvent(hub);
+    else txt('等待下一回合', r.cx, r.cy, { size: 18, color: C_SUB, bold: true, anchor: 'mc' });
+    const fade = hub.fade === undefined ? 1 : hub.fade;
+    if (fade < 1) fillRR([18, 24, 38, 1 - easeOut(fade)], r, 26);   // 切換時淡入
+  }
+  stepCard(k, rect, used, selected, enabled) {
+    const key = 'card' + k;
+    const inside = enabled && hit(rect, this.mouse);
+    let hv = this.hover[key] || 0; hv += ((inside ? 1 : 0) - hv) * Math.min(1, this.dt * 16); this.hover[key] = hv;
+    let sv = this.hover[key + 's'] || 0; sv += ((selected ? 1 : 0) - sv) * Math.min(1, this.dt * 14); this.hover[key + 's'] = sv;
+    const r = infl(mv(rect, 0, -8 * sv - 4 * hv), 8 * sv + 6 * hv, 8 * sv + 6 * hv);
+    if (used) {
+      fillRR([30, 41, 59, 0.55], r, 16, [51, 65, 85, 0.43], 1);
+      txt(String(k + 1), r.cx, r.y + 42, { size: 36, color: C_MUTED, bold: true, anchor: 'mc' });
+      txt('冷卻中', r.cx, r.b - 18, { size: 12, color: C_MUTED, anchor: 'mc' });
+    } else {
+      const glow = Math.max(sv, hv);
+      const bd = mix([71, 85, 105], C_SKY, glow);                    // 懸停／選取：邊框點亮為天藍色
+      drawGlassCard(r, 16, A(bd, 0.6 + 0.4 * glow), A(C_SKY, 0.12 + 0.23 * sv));
+      if (glow > 0.05) drawGlow(r, 16, C_SKY, glow * 0.7);
+      txt(String(k + 1), r.cx, r.y + 42, { size: 40, color: mix(C_TEXT, C_SKY, sv), bold: true, anchor: 'mc' });
+      txt('步', r.cx, r.y + 72, { size: 14, color: sv < 0.5 ? C_SUB : C_SKY, bold: true, anchor: 'mc' });
+      for (let d = 0; d <= k; d++) circle(r.cx + (d - k / 2) * 10, r.b - 14, 3, mix(C_MUTED, C_SKY, Math.max(sv, 0.4)));
+    }
+    if (enabled && !used) this.buttons.push([key, rect]);
+  }
+  drawHubPlan() {
+    const r = HUB, h = this.players[0];
+    txt('選擇本回合步數卡', r.cx, r.y + 18, { size: 20, bold: true, anchor: 'tc' });
+    txt('觀察對手手牌池，預判誰會踩進哪一格', r.cx, r.y + 46, { size: 12, color: C_SUB, anchor: 'tc' });
+    for (let k = 0; k < 4; k++) {
+      const cr = R(r.x + 26 + k * 88, r.y + 80, 78, 104);
+      const sel = !h.locked ? this.selected === k : h.choice === k + 1;
+      this.stepCard(k, cr, h.used[k] && !(h.locked && h.choice === k + 1), sel, !h.locked && !h.used[k]);
+    }
+    if (this.selected !== null && !h.locked) {
+      const tp = (h.pos + this.selected + 1) % 16;
+      let note = `預計落點：${this.tiles[tp].name}`;
+      if (h.pos + this.selected + 1 >= 16) note += '（經過起點 +$600）';
+      txt(note, r.cx, r.y + 212, { size: 14, bold: true, anchor: 'tc', maxW: r.w - 40 });
+    } else if (h.locked) txt(`已鎖定 ${h.choice} 步，等待其他玩家…`, r.cx, r.y + 212, { size: 14, color: C_GREEN, bold: true, anchor: 'tc' });
+    else txt('點選一張步數卡（也可按 1~4）', r.cx, r.y + 212, { size: 14, color: C_SUB, anchor: 'tc' });
+    const cb = R(r.cx - 120, r.y + 262, 240, 50);
+    if (h.locked) this.pill('confirm', cb, '已鎖定，等待揭曉…', C_GREEN, false, 'solid', 16);
+    else this.pill('confirm', cb, '確認出招', C_SKY, this.selected !== null, 'solid', 18);
+    const left = Math.max(0, Math.ceil(this.planT));
+    txt(`${left} 秒後自動出牌`, r.cx, r.y + 330, { size: 12, color: left > 3 ? C_SUB : C_RED, anchor: 'tc' });
+  }
+  drawHubReveal(hub) {
+    const r = HUB;
+    txt('同步揭曉！', r.cx, r.y + 18, { size: 20, bold: true, anchor: 'tc' });
+    txt('四位玩家同時出牌，棋子即將出發', r.cx, r.y + 46, { size: 12, color: C_SUB, anchor: 'tc' });
+    this.players.forEach((p, i) => {
+      const row = R(r.x + 24, r.y + 80 + i * 66, r.w - 48, 54);
+      fillRR([51, 65, 85, 0.39], row, 27, [71, 85, 105, 0.55], 1);
+      circle(row.x + 26, row.cy, 8, p.color);
+      txt(p.name, row.x + 46, row.cy, { size: 16, bold: true, anchor: 'ml', maxW: 170 });
+      this.tag(R(row.r - 104, row.y + 11, 92, 32), hub.age > 0.3 + i * 0.2 ? `${p.choice} 步` : '？', p.color, 16);
+    });
+  }
+  drawLines(hub, y, bottom) {
+    const r = HUB; let n = 0;
+    for (const [text, col] of hub.lines || []) {
+      if (hub.stagger && hub.age < n * 0.35) { n++; continue; }   // 逐行淡入
+      for (const part of wrap(text, 14, false, r.w - 56)) {
+        if (y + 20 > bottom) return;
+        txt(part, r.cx, y, { size: 14, color: col, bold: col !== C_SUB, anchor: 'tc' });
+        y += 21;
+      }
+      n++;
+    }
+  }
+  drawHubEvent(hub) {
+    const r = HUB;
+    let y = this.hubHeader(hub);
+    txt(hub.title, r.cx, y, { size: 20, color: hub.accent || C_TEXT, bold: true, anchor: 'tc', maxW: r.w - 40 });
+    y += 30;
+    for (const part of wrap(hub.sub || '', 13, false, r.w - 56).slice(0, 2)) { txt(part, r.cx, y, { size: 13, color: C_SUB, anchor: 'tc' }); y += 19; }
+    y += 10;
+    const btns = hub.buttons || [];
+    let bottom = r.b - 24;
+    if (btns.length) bottom = r.b - 24 - (btns.length * 46 + (btns.length - 1) * 10) - 6;
+    this.drawLines(hub, y, bottom);
+    if (btns.length) {
+      let by = r.b - 24 - (btns.length * 46 + (btns.length - 1) * 10);
+      for (const b of btns) {
+        const active = hub.choice === null;
+        this.pill('ev:' + b.key, R(r.x + 24, by, r.w - 48, 46), b.label, b.color, b.enabled && active, b.style, 16);
+        by += 56;
+      }
+    }
+  }
+
+  // ═══════════════ 繪製：聊天室 / 飄字 ═══════════════
+  drawChat() {
+    const r = R(RIGHT_X, CONTENT_Y, RIGHT_W, CONTENT_H);
+    drawGlassCard(r, 22, BORDER, C_PANEL);
+    txt('派對即時訊息', r.x + 20, r.y + 14, { size: 18, bold: true });
+    const pulse = 0.5 + 0.5 * Math.sin(this.time * 3);
+    circle(r.x + 26, r.y + 47, 4, mix(C_BG, C_GREEN, 0.55 + 0.45 * pulse));
+    txt('4 位玩家連線中', r.x + 36, r.y + 40, { size: 12, color: C_SUB });
+    X.fillStyle = 'rgb(51,65,85)'; X.fillRect(r.x + 16, r.y + 62, r.w - 32, 1);
+    const area = R(r.x + 1, r.y + 64, r.w - 2, r.h - 72);
+    X.save(); X.beginPath(); X.rect(area.x, area.y, area.w, area.h); X.clip();
+    let y = area.b - 4;
+    for (let i = this.chat.length - 1; i >= 0; i--) {
+      const m = this.chat[i], L = this.chatLayout(m), age = this.time - m.t0;
+      y -= L.h;
+      let slide = 0, alpha = 1;
+      if (age < 0.35) { const k = easeOut(age / 0.35); slide = (1 - k) * 14; alpha = k; }
+      this.drawMsg(m, L, r.x, y + slide, alpha);
+      y -= 6;
+      if (y < area.y - 30) break;
+    }
+    X.restore();
+  }
+  drawMsg(m, L, ox, oy, alpha) {
+    X.save(); X.globalAlpha = alpha;
+    if (m.kind === 'sys') {
+      fillRR([30, 41, 59, 0.78], R(ox + (RIGHT_W - L.tw) / 2, oy, L.tw, L.h - 2), Math.min(14, (L.h - 2) / 2), [51, 65, 85, 0.55], 1);
+      L.lines.forEach((l, i) => txt(l, ox + RIGHT_W / 2, oy + 5 + i * 16 + 8, { size: 12, color: m.color, anchor: 'mc' }));
+    } else {
+      let bx, col;
+      if (m.kind === 'ai') {
+        const p = this.players[m.p];
+        circle(ox + 26, oy + L.top + 16, 14, p.color);
+        txt(p.short, ox + 26, oy + L.top + 16, { size: 14, color: C_BG, bold: true, anchor: 'mc' });
+        txt(p.name, ox + 46, oy, { size: 11, color: p.color, bold: true });
+        bx = ox + 46; col = C_TEXT;
+        fillRR([51, 65, 85, 0.92], R(bx, oy + L.top, L.bw, L.bh), 17, [71, 85, 105, 0.63], 1);
+      } else {
+        bx = ox + RIGHT_W - 14 - L.bw; col = C_BG;
+        fillRR(C_SKY, R(bx, oy + L.top, L.bw, L.bh), 17);
+      }
+      L.lines.forEach((l, i) => txt(l, bx + 13, oy + L.top + 7 + i * 20, { size: 14, color: col }));
+    }
+    X.restore();
+  }
+  drawToasts() {
+    for (const t of this.toasts) {
+      const q = (this.time - t.start) / t.life;
+      if (q < 0) continue;
+      const y = t.ay - 48 * easeOut(q);
+      const alpha = q < 0.6 ? 1 : 1 - (q - 0.6) / 0.4;
+      const w = textW(t.text, 19, true) + 24, h = 31;
+      X.save(); X.globalAlpha = Math.max(0, alpha);
+      fillRR([15, 23, 42, 0.92], R(t.ax - w / 2, y, w, h), h / 2, A(t.color, 0.59), 1);
+      txt(t.text, t.ax, y + h / 2, { size: 19, color: t.color, bold: true, anchor: 'mc' });
+      X.restore();
+    }
+  }
+
+  // ═══════════════ 繪製：標題畫面 / 終局報表 ═══════════════
+  drawTitle() {
+    const r = R(W / 2 - 420, H / 2 + 14 - 300, 840, 600);
+    drawGlassCard(r, 36, BORDER, C_PANEL);
+    txt('CAPITAL PULSE', r.cx, r.y + 40, { size: 54, bold: true, anchor: 'tc' });
+    txt('v2 · 零等待極簡商戰', r.cx, r.y + 112, { size: 22, color: C_SKY, bold: true, anchor: 'tc' });
+    const feats = [['1 同步出牌', '4 張步數卡 · 全員同時出牌\n沒有擲骰運氣，只有推理', C_SKY],
+                   ['2 半價入股 / 雙倍攔截', '別人買地就是你的機會\n付 50% 入股，付 200% 奪地', C_GREEN],
+                   ['3 撞格平分產權', '同時踩進空地？兩人各付 50%\n一人地主 70%、一人股東 30%', C_ORANGE]];
+    feats.forEach(([t, d, c], i) => {
+      const fr = R(r.x + 36 + i * 262, r.y + 176, 246, 160);
+      drawGlassCard(fr, 22, A(c, 0.47), A(c, 0.10));
+      circle(fr.x + 28, fr.y + 32, 8, c);
+      txt(t, fr.x + 46, fr.y + 22, { size: 17, bold: true, maxW: fr.w - 60 });
+      d.split('\n').forEach((line, j) => txt(line, fr.x + 22, fr.y + 76 + j * 26, { size: 14, color: C_SUB, maxW: fr.w - 36 }));
+    });
+    this.players.forEach((p, i) => this.tag(R(r.x + 52 + i * 188, r.y + 368, 176, 34), p.name, p.color, 14));
+    this.pill('start', R(r.cx - 120, r.y + 436, 240, 56), '開始遊戲', C_SKY, true, 'solid', 20);
+    txt('滑鼠 / 觸控點擊操作 · 1~4 選步數 · Enter 確認', r.cx, r.y + 530, { size: 13, color: C_SUB, anchor: 'tc' });
+  }
+  drawFinal() {
+    const f = this.final;
+    X.fillStyle = css(A(C_BG, Math.min(1, f.t * 3) * 0.84)); X.fillRect(0, 0, W, H);
+    const r = R(W / 2 - 400, H / 2 - 300, 800, 600);
+    drawGlassCard(r, 32, BORDER, C_PANEL);
+    txt('最終財報結算榜', r.cx, r.y + 28, { size: 30, bold: true, anchor: 'tc' });
+    txt(f.reason, r.cx, r.y + 72, { size: 14, color: C_SUB, anchor: 'tc', maxW: r.w - 60 });
+    const hy = r.y + 108;
+    [[r.x + 330, '現金'], [r.x + 450, '獨佔地產'], [r.x + 570, '股權(半價估值)']].forEach(([x, lab]) => txt(lab, x, hy, { size: 12, color: C_SUB, anchor: 'tr' }));
+    txt('總資產', r.r - 30, hy, { size: 12, color: C_SUB, anchor: 'tr' });
+    const topNet = Math.max(1, ...f.rows.map(row => row.net));
+    f.rows.forEach((row, i) => {
+      const p = row.p, rr = R(r.x + 24, r.y + 132 + i * 92, r.w - 48, 82);
+      const prog = clamp(easeOut((f.t - 0.4 - i * 0.25) / 0.9), 0, 1);
+      if (i === 0) drawGlassCard(rr, 20, A(p.color, 0.9), A(p.color, 0.13), false);
+      else fillRR([30, 41, 59, 0.59], rr, 20, [51, 65, 85, 0.51], 1);
+      circle(rr.x + 34, rr.y + 32, 17, p.color);
+      txt(String(i + 1), rr.x + 34, rr.y + 32, { size: 18, color: C_BG, bold: true, anchor: 'mc' });
+      txt(p.name, rr.x + 62, rr.y + 14, { size: 19, bold: true, maxW: 170 });
+      if (i === 0) this.tag(R(rr.x + 62, rr.y + 42, 64, 22), '冠軍', p.color, 12);
+      [[r.x + 330, row.cash], [r.x + 450, row.prop], [r.x + 570, row.share]].forEach(([x, v]) => txt('$' + fmt(v * prog), x, rr.y + 24, { size: 15, anchor: 'tr' }));
+      txt('$' + fmt(row.net * prog), rr.r - 18, rr.y + 16, { size: 22, bold: true, anchor: 'tr' });
+      const bar = R(rr.x + 150, rr.y + 62, rr.w - 175, 8);
+      fillRR([51, 65, 85], bar, 4);
+      const wv = bar.w * prog * Math.max(0, row.net) / topNet;
+      if (wv > 4) fillRR(p.color, R(bar.x, bar.y, wv, 8), 4);
+    });
+    txt('總資產 = 最終現金 + 獨佔地產 + 30% 小股東股權（按半價估值）', r.cx, r.b - 82, { size: 12, color: C_SUB, anchor: 'tc' });
+    if (f.t > 1.2) this.pill('replay', R(r.cx - 100, r.b - 66, 200, 48), '再玩一局', C_SKY, true, 'solid', 18);
+  }
+
+  // ═══════════════ 主繪製 ═══════════════
+  draw() {
+    this.buttons = [];
+    X.drawImage(this.bg, 0, 0);
+    this.drawTopbar();
+    if (this.state === 'title') this.drawTitle();
+    else {
+      this.drawPlayers(); this.drawBoard(); this.drawChat(); this.drawToasts();
+      if (this.final) this.drawFinal();
+    }
+    const over = this.buttons.some(([, q]) => hit(q, this.mouse));
+    if (over !== this.hand) { this.hand = over; canvas.style.cursor = over ? 'pointer' : 'default'; }
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+// 六、啟動：自適應縮放（高 DPI 清晰）、輸入、主迴圈
+// ════════════════════════════════════════════════════════════════
+const game = new Game();
+let viewScale = 1;
+function resize() {
+  const cssScale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = Math.floor(W * cssScale) + 'px';
+  canvas.style.height = Math.floor(H * cssScale) + 'px';
+  viewScale = cssScale * dpr;
+  canvas.width = Math.max(1, Math.round(W * viewScale));
+  canvas.height = Math.max(1, Math.round(H * viewScale));
+}
+function toLocal(e) {
+  const b = canvas.getBoundingClientRect();
+  return { x: (e.clientX - b.left) / b.width * W, y: (e.clientY - b.top) / b.height * H };
+}
+window.addEventListener('resize', resize);
+canvas.addEventListener('pointermove', e => { game.mouse = toLocal(e); });
+canvas.addEventListener('pointerdown', e => {
+  game.mouse = toLocal(e);
+  game.handleClick(game.mouse);
+  e.preventDefault();
+});
+canvas.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') game.mouse = { x: -1, y: -1 }; });
+canvas.addEventListener('pointerleave', () => { game.mouse = { x: -1, y: -1 }; });
+window.addEventListener('keydown', e => game.keydown(e));
+resize();
+canvas.focus();
+
+let last = 0;
+function frame(ts) {
+  const dt = Math.min(0.05, last ? (ts - last) / 1000 : 1 / 60);
+  last = ts;
+  X.setTransform(viewScale, 0, 0, viewScale, 0, 0);
+  game.update(dt);
+  game.draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+window.__game = game;   // 方便除錯
+</script>
+</body>
+</html>
